@@ -1,0 +1,117 @@
+
+--------------------
+--- Libraries
+--------------------
+
+REGISTER /x/home/pp_dt_mkt_batch/M360/lib/m360.jar;
+REGISTER /x/home/pp_dt_mkt_batch/M360/lib/URLParser.jar;
+REGISTER '/x/home/dm_eap_batch_prod/eap/prod/hdp/lib/*.jar';
+
+IMPORT '/x/home/dm_eap_batch_prod/eap/prod/pig/EntityAttributesMacro.pig';
+
+--------------------
+--- Setup
+--------------------
+
+SET mapreduce.job.queuename dt_marketing;
+SET default_parallel 300;
+SET mapred.task.timeout 7200000;
+SET mapreduce.output.fileoutputformat.compress false;
+
+DEFINE ToDate org.paypal.m360.udf.eval.ToDate();
+DEFINE MergeMktgChannelReferrerType org.paypal.m360.udf.eval.MergeMktgChannelReferrerType();
+DEFINE IsEventEpochAmbiguous org.paypal.m360.udf.eval.IsEventEpochAmbiguous();
+DEFINE URLParser com.paypal.dt.pig.udf.URLParser();
+
+--events_data_prep = LOAD 'eap-prod://event' USING com.paypal.dm.eap.engine.data.catalog.pig.EventLoader('{"startDate" : "201
+5-03-28T00:40:22.000PDT", "endDate" : "2015-03-28T02:40:22.000PDT", "timeType" : "load" , "fileStreamType" : "FPTI", "attribu
+tes" : {"all" : "true"}, "entities" : {"all" : "true"}, "derivedEvents" : "false", "useOnlyCertifiedDerivedEvents" : "false"
+}','/apps/dm/eap/prod/conf/eap_mapping_prod.xml');
+
+events_data_prep = LOAD 'eap-prod://event' USING com.paypal.dm.eap.engine.data.catalog.pig.EventLoader('{"startDate" : "$EAP_
+START_DT", "endDate" : "$EAP_END_DT", "timeType" : "load" , "fileStreamType" : "FPTI", "attributes" : {"all" : "true"}, "enti
+ties" : {"all" : "true"}, "derivedEvents" : "false", "useOnlyCertifiedDerivedEvents" : "false" }','/apps/dm/eap/prod/conf/eap
+_mapping_prod.xml');
+
+events_data = FOREACH events_data_prep GENERATE
+                eapVars.name as name,
+                eapVars.type as type,
+                eapVars.subtype as subtype,
+                eapVars.filestream as filestream,
+                eapVars.timestamp as timestamp,
+                eapVars.loadId as loadId,
+                attributes#'customer_id',
+                entities#'Web_Session';
+
+-- remove the output directory if exists
+rmf /user/pp_dt_mkt_batch/mkt/STG_AU_Fraud_detection/MKT_AU_FRAUD_CUST_SUMM/stg_au_fraud_cust_pre;
+
+-- store results in specified output location
+STORE events_data INTO '/user/pp_dt_mkt_batch/mkt/STG_AU_Fraud_detection/MKT_AU_FRAUD_CUST_SUMM/stg_au_fraud_cust_pre' USING
+PigStorage('\u0007');
+
+eventData = LOAD '/user/pp_dt_mkt_batch/mkt/STG_AU_Fraud_detection/MKT_AU_FRAUD_CUST_SUMM/stg_au_fraud_cust_pre' USING PigSto
+rage('\u0007') AS (name:chararray,type:chararray,subtype:chararray,filestream:chararray,timestamp:chararray,loadId:chararray,
+customer_id:chararray,Web_Session:chararray);
+
+--web_session_entities_data = LOAD 'eap-prod://entities' USING com.paypal.dm.eap.engine.data.catalog.pig.EntityLoader('{ "sta
+rtDate": "2015-03-28T00:40:22.000PDT", "endDate" : "2015-03-28T02:40:22.000PDT", "timeType" : "load","fileStreamType":"FPTI",
+ "range" : "1", "rangeType" : "DAYS", "entityName": "Web_Session", "entityAttributes": { "all": "true" }}','/apps/dm/eap/prod
+/conf/eap_mapping_prod.xml');
+
+web_session_entities_data = LOAD 'eap-prod://entities' USING com.paypal.dm.eap.engine.data.catalog.pig.EntityLoader('{ "start
+Date": "$EAP_START_DT", "endDate" : "$EAP_END_DT", "timeType" : "load","fileStreamType":"FPTI", "range" : "1", "rangeType" :
+"DAYS", "entityName": "Web_Session", "entityAttributes": { "all": "true" }}','/apps/dm/eap/prod/conf/eap_mapping_prod.xml');
+
+web_session_entity_attributes = EntityAttributesComputation(web_session_entities_data,'Web_Session');
+
+joined_events_web_session_entities = JOIN eventData BY Web_Session,web_session_entity_attributes BY entityId;
+
+eventData_gen = FOREACH joined_events_web_session_entities
+                             GENERATE
+                                (chararray)eventData::name as name,
+                                (chararray)eventData::type as type,
+                                (chararray)eventData::subtype as subtype,
+                                (chararray)eventData::filestream as filestream,
+                                (chararray)eventData::timestamp as timestamp,
+                                (chararray)eventData::loadId as loadId,
+                                (chararray)eventData::customer_id as customer_id,
+                                (chararray)web_session_entity_attributes::Web_Session#'web_session_id' as web_session_id,
+                                (chararray)web_session_entity_attributes::Web_Session#'session_start_gmt' as session_start_gm
+t,
+                                (chararray)web_session_entity_attributes::Web_Session#'geo_country' as geo_country;
+
+events_eap_filter = FILTER eventData_gen BY(
+customer_id is not null and
+session_start_gmt is not null and
+web_session_id is not null and
+geo_country == 'AU'
+);
+
+events_eap_filter2 = FOREACH events_eap_filter
+                             GENERATE
+                                name,
+                                type,
+                                subtype,
+                                filestream,
+                                timestamp,
+                                loadId,
+                                customer_id,
+                                web_session_id,
+                                ToDate((long)session_start_gmt, 'yyyy-MM-dd') as session_start_dt,
+                                geo_country;
+
+sess_distinct = group events_eap_filter2 by (web_session_id,customer_id,session_start_dt);
+sess_distinct_gen = foreach sess_distinct generate flatten(group) as (web_session_id,customer_id,session_start_dt);
+
+cust_distinct = group sess_distinct_gen by (customer_id);
+cust_distinct_gen = foreach cust_distinct
+                       generate
+                           flatten(group) as (customer_id),
+                           MIN(sess_distinct_gen.session_start_dt) as min_session_start_dt,
+                           MAX(sess_distinct_gen.session_start_dt) as max_session_start_dt,
+                           COUNT(sess_distinct_gen.customer_id) as visit_count
+                           ;
+
+rmf /user/pp_dt_mkt_batch/mkt/AU_Fraud_detection/MKT_AU_FRAUD_CUST_SUMM;
+store cust_distinct_gen into '/user/pp_dt_mkt_batch/mkt/AU_Fraud_detection/MKT_AU_FRAUD_CUST_SUMM' USING PigStorage(',');

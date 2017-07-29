@@ -1,0 +1,58 @@
+
+
+-- IO Part
+FROM ${env:M360_WORKING_DB}.wrk_FactConvEvents src
+INSERT OVERWRITE DIRECTORY '${env:M360_HDFS_MAIN}/FactConvEvents/2015-04-21' SELECT src.* WHERE src.conv_event_srv_date = '2015-04-21'
+;
+-- Add Part
+use ${env:M360_MAIN_DB};ALTER TABLE FactConvEvents ADD IF NOT EXISTS PARTITION (EDate='2015-04-21') location '${env:M360_HDFS_MAIN}/FactConvEvents/2015-04-21';
+[syerusu@lvsdmetl17 hql]$ cat FactConvAttributions_d.hql
+
+-- IO Part
+FROM ${env:M360_WORKING_DB}.wrk_FactConvAttributions src
+INSERT OVERWRITE DIRECTORY '${env:M360_HDFS_MAIN}/FactConvAttributions/2015-04-21' SELECT src.* WHERE src.conv_event_srv_date = '2015-04-21'
+;
+-- Add Part
+use ${env:M360_MAIN_DB};ALTER TABLE FactConvAttributions ADD IF NOT EXISTS PARTITION (EDate='2015-04-21') location '${env:M360_HDFS_MAIN}/FactConvAttributions/2015-04-21';
+[syerusu@lvsdmetl17 hql]$ cat DimKeyKeyword_d.hql
+
+-- IO Part
+FROM ${env:M360_WORKING_DB}.wrk_DimKeyKeyword src
+INSERT OVERWRITE DIRECTORY '${env:M360_HDFS_MAIN}/DimKeyKeyword/2015-04-22' SELECT src.* WHERE src.event_srv_date = '2015-04-22'
+;
+-- Add Part
+use ${env:M360_MAIN_DB};ALTER TABLE DimKeyKeyword ADD IF NOT EXISTS PARTITION (EDate='2015-04-22') location '${env:M360_HDFS_MAIN}/DimKeyKeyword/2015-04-22';
+[syerusu@lvsdmetl17 hql]$ cat DwCustMap_Edw_AddPartitions_d.hql
+
+-- Add Part
+use ${env:M360_MAIN_DB};ALTER TABLE DwCustMap_Edw ADD IF NOT EXISTS PARTITION (year='2015', month='04', day='19', seq='00') location '/sys/pp_dt/SD/mozart/dw_customer_map/sequence/snapshot/2015/04/19/00' ;
+[syerusu@lvsdmetl17 hql]$
+[syerusu@lvsdmetl17 hql]$ cat DwCustMap_Edw_AddPartitions_t.hql
+--Start Add Part
+use ${env:M360_MAIN_DB};ALTER TABLE DwCustMap_Edw ADD IF NOT EXISTS PARTITION (year='#PYear#', month='#PMonth#', day='#PDay#', seq='00') location '/sys/pp_dt/SD/mozart/dw_customer_map/sequence/snapshot/#PYear#/#PMonth#/#PDay#/00' ;
+--End Add Part
+[syerusu@lvsdmetl17 hql]$ cat wrk_DwCustMap_DeDupe.hql
+INSERT OVERWRITE DIRECTORY '${env:M360_HDFS_WORKING}/wrk_DwCustMap_DeDupe'
+SELECT DISTINCT
+    DwCustMap_Edw.customer_id,
+    DwCustMap_Edw.AIENC_ID,
+    from_unixtime(unix_timestamp(DwCustMap_Edw.upd_date, 'yyyy-MM-dd HH:mm:ss'),'yyyy-MM-dd HH:mm:ss') upd_ts
+FROM ${env:M360_MAIN_DB}.DwCustMap_Edw DwCustMap_Edw
+INNER JOIN (
+    SELECT
+        customer_id,
+        MAX(from_unixtime(unix_timestamp(UPD_DATE, 'yyyy-MM-dd HH:mm:ss'),'yyyy-MM-dd HH:mm:ss')) upd_ts_max
+    FROM ${env:M360_MAIN_DB}.DwCustMap_Edw
+    WHERE (cast(year as int) between YEAR('${hiveconf:StartDate}') and YEAR('${hiveconf:EndDate}'))
+        and (cast(month as int) between MONTH('${hiveconf:StartDate}') and MONTH('${hiveconf:EndDate}'))
+        and (cast(day as int) between DAY('${hiveconf:StartDate}') and DAY('${hiveconf:EndDate}'))
+
+    GROUP BY customer_id
+) DwCustMap_Edw_MAX
+ON DwCustMap_Edw.customer_id = DwCustMap_Edw_MAX.customer_id
+AND from_unixtime(unix_timestamp(DwCustMap_Edw.UPD_DATE, 'yyyy-MM-dd HH:mm:ss'),'yyyy-MM-dd HH:mm:ss')  = DwCustMap_Edw_MAX.upd_ts_max
+WHERE (cast(year as int) between YEAR('${hiveconf:StartDate}') and YEAR('${hiveconf:EndDate}'))
+        and (cast(month as int) between MONTH('${hiveconf:StartDate}') and MONTH('${hiveconf:EndDate}'))
+        and (cast(day as int) between DAY('${hiveconf:StartDate}') and DAY('${hiveconf:EndDate}'));
+		
+		

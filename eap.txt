@@ -1,0 +1,252 @@
+EAP Load - All Intraday Manny Prod--MD_EAP_FPTI_LOADER_STAMPY_INTRADAY_PROD
+
+
+
+[syerusu@lvsdmetl15 pig]$ cat EventDump_GEC.pig
+-----------------------------------------------------------------------
+------ Event dump based on EAP 3.0 Pig APIs  -----
+-----------------------------------------------------------------------
+set mapreduce.output.fileoutputformat.compress false;
+SET yarn.app.mapreduce.am.resource.mb '5120';
+SET yarn.app.mapreduce.am.command-opts '-Xmx5120m';
+
+-- declare variables
+%DECLARE EVENT_MAP_IDENTIFIER 'EVENT';
+
+%DECLARE EVENT_ENTITIES_MAP_IDENTIFIER 'EVENT_ENTITIES';
+
+%DECLARE EXTRACT_DERIVED_EVENTS 'true';
+
+%DECLARE COLUMN_SEPARATOR '\\t';
+
+-- Use & as payload seperator while loading into jagaur
+%DECLARE PAYLOADS_SEPARATOR '&';
+
+REGISTER '$LIB/*.jar';
+
+-- set the number of reducers
+SET default_parallel $REDUCERS;
+
+-- add alias for AddIdentifierInMap UDF
+DEFINE AddMapIdentifier com.paypal.dm.eap.engine.pig.udf.AddMapIdentifier();
+
+-- add alias for CheckValueIn UDF
+DEFINE CheckValueIn com.paypal.dm.eap.engine.pig.udf.CheckValueIn();
+
+-- define alias for Generate EVENT DUMP payload UDF
+DEFINE GenerateEventDumpAttributesAndPayloads com.paypal.dm.eap.engine.pig.dump.event.udf.GenerateEventDumpAttributesAndPayloads('$EVENT_DUMP_XML','$JS_LIB_PATH');
+
+-- define alias for Format EVENT DUMP attributes UDF
+DEFINE FormatEventDumpAttributes com.paypal.dm.eap.engine.pig.dump.event.udf.FormatEventDumpAttributes('$EVENT_DUMP_XML','$COLUMN_SEPARATOR');
+
+-- define alias for Format EVENT DUMP payload UDF
+DEFINE FormatEventDumpPayLoadAttributes com.paypal.dm.eap.engine.pig.dump.event.udf.FormatEventDumpPayLoadAttributes('$PAYLOADS_SEPARATOR');
+
+-- define alias for Generate EVENT DUMP derived Events UDF
+DEFINE GenerateEventDumpDerivedEvents com.paypal.dm.eap.engine.pig.dump.event.udf.GenerateDerivedEvents();
+
+-- load events data
+events_data = LOAD 'eap-$ENV://event' USING com.paypal.dm.eap.engine.data.catalog.pig.EventLoader('{"startDate" : "$START_DATE", "endDate" : "$END_DATE", "timeType" : "$TIME_TYPE", "fileStreamType" : "$FILESTREAM_TYPE", "attributes" : {"all" : "true"}, "entities" : {"all" : "true"}, "derivedEvents" : "$EXTRACT_DERIVED_EVENTS", "useOnlyCertifiedDerivedEvents" : "false" }','$MAPPING_XML');
+
+-- Filter out events data using CheckValueIn UDf based on event name
+-- Event names are comma seperated values
+events_data = FILTER events_data BY CheckValueIn(eapVars.name,'$EVENT_NAMES');
+
+-- add identifier to events attributes map using the UDF
+events_entities_proj = FOREACH events_data GENERATE
+        eapVars AS eapVarsTuple,
+        derivedEvents,
+        AddMapIdentifier('$EVENT_ENTITIES_MAP_IDENTIFIER', entities) as eventEntitiesMap,
+        AddMapIdentifier('$EVENT_MAP_IDENTIFIER', attributes) as eventAttributesMap;
+
+-- Compose the data needed for the event dump output
+event_dump_payload_attributes = FOREACH events_entities_proj GENERATE
+        eapVarsTuple.id,
+        GenerateEventDumpAttributesAndPayloads(eapVarsTuple, TOTUPLE(eventAttributesMap, eventEntitiesMap));
+--      Output Tuple structure is ==> (eventDumpOutput: tuple(eventDumpAttributes: tuple(name:chararray, type:chararray, subtype:chararray, stream:chararray, timestamp:long, loadId:int, eventDumpColumns:map[])
+--                      , eventDumpPayloads: bag{payloads: tuple(payload:chararray)}));
+
+
+-- filter data where no event dump output was generated
+event_dump_payload_attributes = FILTER event_dump_payload_attributes BY eventDumpOutput IS NOT NULL;
+
+-- form event dump attributes
+event_dump_attributes = FOREACH event_dump_payload_attributes GENERATE
+        id,
+        eventDumpOutput.eventDumpAttributes.name AS name,
+        eventDumpOutput.eventDumpAttributes.type AS type,
+        eventDumpOutput.eventDumpAttributes.subtype AS subtype,
+        eventDumpOutput.eventDumpAttributes.filestream AS filestream,
+        eventDumpOutput.eventDumpAttributes.timestamp AS timestamp,
+        eventDumpOutput.eventDumpAttributes.loadId AS loadId,
+        FormatEventDumpAttributes(eventDumpOutput.eventDumpAttributes.eventDumpColumns);
+--      Output Tuple structure is ==> (eventDumpColumns:chararray);
+
+-- filter event dump columns where the value was not NULL
+-- event_dump_attributes = FILTER event_dump_attributes BY eventDumpColumns IS NOT NULL;
+event_dump_attributes = FILTER event_dump_attributes BY $7 IS NOT NULL;
+
+-- form event dump payload
+event_dump_payload = FILTER event_dump_payload_attributes BY eventDumpOutput.eventDumpPayloads IS NOT NULL;
+event_dump_payload = FOREACH event_dump_payload GENERATE
+        id,
+        FormatEventDumpPayLoadAttributes(eventDumpOutput.eventDumpPayloads) as eventDumpPayloads;
+--      Output Tuple structure is ==> (eventDumpPayloads:chararray);
+
+-- Filter records where we did not construct any payloads
+-- event_dump_payload = FILTER event_dump_payload BY eventDumpPayloads IS NOT NULL;
+event_dump_payload = FILTER event_dump_payload BY $1 IS NOT NULL;
+
+-- While loading into jaguar to truncate payload to 4096 characters
+event_dump_payload = FOREACH event_dump_payload GENERATE
+                              id,
+                              SUBSTRING(eventDumpPayloads,0,4095) as payload;
+
+-- form event dump derived events
+event_dump_derived_events = FOREACH events_entities_proj GENERATE
+        flatten(GenerateEventDumpDerivedEvents(eapVarsTuple.id, derivedEvents));
+--      Output Tuple structure is ==> (eventId:long, derivedEventName:chararray);
+
+event_dump_derived_events = FILTER event_dump_derived_events BY derivedEventName IS NOT NULL;
+
+-- store the event dump attributes
+STORE event_dump_attributes INTO '$EVENT_DUMP_ATTRIBUTES_OUTPUT_PATH';
+
+-- store the event dump payload
+STORE event_dump_payload INTO '$EVENT_DUMP_PAYLOAD_OUTPUT_PATH';
+
+-- store the event dump derived events
+STORE event_dump_derived_events INTO '$EVENT_DUMP_DERIVED_EVENTS_OUTPUT_PATH';
+*********************************************************************************************************
+
+[syerusu@lvsdmetl15 pig]$ cat EventDump.pig
+-----------------------------------------------------------------------
+------ Event dump based on EAP 3.0 Pig APIs  -----
+-----------------------------------------------------------------------
+
+-- declare variables
+%DECLARE EVENT_MAP_IDENTIFIER 'EVENT';
+
+%DECLARE EVENT_ENTITIES_MAP_IDENTIFIER 'EVENT_ENTITIES';
+
+%DECLARE WEB_SESSION_MAP_IDENTIFIER 'Web_Session';
+
+%DECLARE ENTITY_NAME 'Web_Session';
+
+%DECLARE EXTRACT_DERIVED_EVENTS 'true';
+
+%DECLARE COLUMN_SEPARATOR '\\t';
+
+%DECLARE PAYLOADS_SEPARATOR '\\t';
+
+REGISTER '$LIB/*.jar';
+
+-- set the number of reducers
+SET default_parallel $REDUCERS;
+
+-- import the macro
+IMPORT '$MACRO';
+
+-- add alias for AddIdentifierInMap UDF
+DEFINE AddMapIdentifier com.paypal.dm.eap.engine.pig.udf.AddMapIdentifier();
+
+-- add alias for CheckValueIn UDF
+DEFINE CheckValueIn com.paypal.dm.eap.engine.pig.udf.CheckValueIn();
+
+-- define alias for Generate EVENT DUMP payload UDF
+DEFINE GenerateEventDumpAttributesAndPayloads com.paypal.dm.eap.engine.pig.dump.event.udf.GenerateEventDumpAttributesAndPayloads('$EVENT_DUMP_XML','$JS_LIB_PATH');
+
+-- define alias for Format EVENT DUMP attributes UDF
+DEFINE FormatEventDumpAttributes com.paypal.dm.eap.engine.pig.dump.event.udf.FormatEventDumpAttributes('$EVENT_DUMP_XML','$COLUMN_SEPARATOR');
+
+-- define alias for Format EVENT DUMP payload UDF
+DEFINE FormatEventDumpPayLoadAttributes com.paypal.dm.eap.engine.pig.dump.event.udf.FormatEventDumpPayLoadAttributes('$PAYLOADS_SEPARATOR');
+
+-- define alias for Generate EVENT DUMP derived Events UDF
+DEFINE GenerateEventDumpDerivedEvents com.paypal.dm.eap.engine.pig.dump.event.udf.GenerateDerivedEvents();
+
+-- load events data
+events_data = LOAD 'eap-$ENV://event' USING com.paypal.dm.eap.engine.data.catalog.pig.EventLoader('{"startDate" : "$START_DATE", "endDate" : "$END_DATE", "timeType" : "$TIME_TYPE", "fileStreamType" : "$FILESTREAM_TYPE", "attributes" : {"all" : "true"}, "entities" : {"all" : "true"}, "derivedEvents" : "$EXTRACT_DERIVED_EVENTS", "useOnlyCertifiedDerivedEvents" : "false" }','$MAPPING_XML');
+
+-- Filter out events data using CheckValueIn UDf based on event name
+-- Event names are comma seperated values
+events_data = FILTER events_data BY CheckValueIn(eapVars.name,'$EVENT_NAMES');
+
+-- Load entities data
+web_session_entities_data = LOAD 'eap-$ENV://entities' USING com.paypal.dm.eap.engine.data.catalog.pig.EntityLoader('{ "startDate": "$START_DATE", "endDate" : "$END_DATE", "timeType" : "$TIME_TYPE", "fileStreamType":"$FILESTREAM_TYPE", "range" : "$LOOKBACKAHEAD_RANGE", "rangeType" : "$LOOKBACKAHEAD_RANGE_TYPE", "entityName": "$ENTITY_NAME", "entityAttributes": { "all": "true" }}','$MAPPING_XML');
+
+-- Perform entity attribute computation
+web_session_entity_attributes = EntityAttributesComputation(web_session_entities_data,'$ENTITY_NAME');
+
+-- Join events and entities
+joined_events_web_session_entities = JOIN events_data BY entities#'$ENTITY_NAME',web_session_entity_attributes BY entityId;
+
+-- project events and entities
+events_contains_web_session_attributes = FOREACH joined_events_web_session_entities GENERATE
+        events_data::eapVars as eapVarsTuple,
+        events_data::derivedEvents as derivedEvents,
+        events_data::attributes as eventAttributesMap,
+        events_data::entities as eventEntitiesMap,
+        web_session_entity_attributes::Web_Session as WebSession_EntitiesAttributesMap;
+
+-- add identifier to events attributes map using the UDF
+events_entities_proj = FOREACH events_contains_web_session_attributes GENERATE
+        eapVarsTuple,
+        derivedEvents,
+        AddMapIdentifier('$EVENT_ENTITIES_MAP_IDENTIFIER', eventEntitiesMap) as eventEntitiesMap,
+        AddMapIdentifier('$EVENT_MAP_IDENTIFIER', eventAttributesMap) as eventAttributesMap,
+        AddMapIdentifier('$WEB_SESSION_MAP_IDENTIFIER', WebSession_EntitiesAttributesMap) as WebSession_EntitiesAttributesMap;
+
+-- Compose the data needed for the event dump output
+event_dump_payload_attributes = FOREACH events_entities_proj GENERATE
+        eapVarsTuple.id,
+        GenerateEventDumpAttributesAndPayloads(eapVarsTuple, TOTUPLE(eventAttributesMap, eventEntitiesMap, WebSession_EntitiesAttributesMap));
+--              AS (eventDumpOutput: tuple(eventDumpAttributes: tuple(name:chararray, type:chararray, subtype:chararray, stream:chararray, timestamp:long, loadId:int, eventDumpColumns:map[])
+--                      , eventDumpPayloads: bag{payloads: tuple(payload:chararray)}));
+
+
+-- filter data where no event dump output was generated
+event_dump_payload_attributes = FILTER event_dump_payload_attributes BY eventDumpOutput IS NOT NULL;
+
+-- form event dump attributes
+event_dump_attributes = FOREACH event_dump_payload_attributes GENERATE
+        id,
+        eventDumpOutput.eventDumpAttributes.name AS name,
+        eventDumpOutput.eventDumpAttributes.type AS type,
+        eventDumpOutput.eventDumpAttributes.subtype AS subtype,
+        eventDumpOutput.eventDumpAttributes.filestream AS filestream,
+        eventDumpOutput.eventDumpAttributes.timestamp AS timestamp,
+        eventDumpOutput.eventDumpAttributes.loadId AS loadId,
+        FormatEventDumpAttributes(eventDumpOutput.eventDumpAttributes.eventDumpColumns);
+--      AS (eventDumpColumns:chararray);
+
+-- filter event dump columns where the value was not NULL
+-- event_dump_attributes = FILTER event_dump_attributes BY eventDumpColumns IS NOT NULL;
+event_dump_attributes = FILTER event_dump_attributes BY $7 IS NOT NULL;
+
+-- form event dump payload
+event_dump_payload = FILTER event_dump_payload_attributes BY eventDumpOutput.eventDumpPayloads IS NOT NULL;
+event_dump_payload = FOREACH event_dump_payload GENERATE
+        id,
+        FormatEventDumpPayLoadAttributes(eventDumpOutput.eventDumpPayloads);
+--      AS (eventDumpPayloads:chararray);
+
+-- Filter records where we did not construct any payloads
+-- event_dump_payload = FILTER event_dump_payload BY eventDumpPayloads IS NOT NULL;
+event_dump_payload = FILTER event_dump_payload BY $1 IS NOT NULL;
+
+-- form event dump derived events
+event_dump_derived_events = FOREACH events_entities_proj GENERATE
+        flatten(GenerateEventDumpDerivedEvents(eapVarsTuple.id, derivedEvents));
+--      AS (eventId:long, derivedEventName:chararray);
+
+event_dump_derived_events = FILTER event_dump_derived_events BY derivedEventName IS NOT NULL;
+
+-- store the event dump attributes
+STORE event_dump_attributes INTO '$EVENT_DUMP_ATTRIBUTES_OUTPUT_PATH';
+
+-- store the event dump payload
+STORE event_dump_payload INTO '$EVENT_DUMP_PAYLOAD_OUTPUT_PATH';
+
+-- store the event dump derived events
+STORE event_dump_derived_events INTO '$EVENT_DUMP_DERIVED_EVENTS_OUTPUT_PATH'

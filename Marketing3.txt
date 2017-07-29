@@ -1,0 +1,216 @@
+Extract aklamio cust signup--MD_EAP_AKLA_CUST_SIGNUP1
+
+
+[syerusu@lvsdmetl17 ~]$ cat /x/home/pp_dt_mkt_batch/mkt/pig/getAklamioSignups1.pig
+-------------------
+--- Libraries
+--------------------
+
+REGISTER /x/home/pp_dt_mkt_batch/M360/lib/m360.jar;
+REGISTER /x/home/pp_dt_mkt_batch/M360/lib/URLParser.jar;
+REGISTER '/x/home/dm_eap_batch_prod/eap/prod/hdp/lib/*.jar';
+
+IMPORT '/x/home/dm_eap_batch_prod/eap/prod/pig/EntityAttributesMacro.pig';
+
+--------------------
+--- Setup
+--------------------
+
+SET mapreduce.job.queuename dt_marketing;
+SET default_parallel 300;
+SET mapred.task.timeout 7200000;
+SET mapreduce.output.fileoutputformat.compress false;
+
+DEFINE ToDate org.paypal.m360.udf.eval.ToDate();
+DEFINE MergeMktgChannelReferrerType org.paypal.m360.udf.eval.MergeMktgChannelReferrerType();
+DEFINE IsEventEpochAmbiguous org.paypal.m360.udf.eval.IsEventEpochAmbiguous();
+DEFINE URLParser com.paypal.dt.pig.udf.URLParser();
+DEFINE SurrogateKey org.paypal.m360.udf.eval.SurrogateKey();
+
+events_data_prep = LOAD 'eap-prod://event' USING com.paypal.dm.eap.engine.data.catalog.pig.EventLoader('{"startDate" : "$EAP_START_DT", "endDate" : "$EAP_END_DT", "timeType" : "load" , "fileStreamType" : "FPTI", "attributes" : {"all" : "true"}, "entities" : {"all" : "true"}, "derivedEvents" : "false", "useOnlyCertifiedDerivedEvents" : "false" }','/apps/dm/eap/prod/conf/eap_mapping_prod.xml');
+
+-- load events from eap
+events_data = FOREACH events_data_prep GENERATE
+                                attributes#'epoch_timestamp_client' as  epoch_timestamp_client,
+                                attributes#'event_time' as  event_time,
+                                attributes#'customer_id' as  customer_id,
+                                attributes#'encrypted_customer_id' as  encrypted_customer_id,
+                                attributes#'user_guid' as user_guid,
+                                attributes#'user_session_guid' as user_session_guid,
+                                attributes#'page_url' as  page_url,
+                                attributes#'page_group' as page_group,
+                                attributes#'page_name' as page_name,
+                                attributes#'traffic_source' as traffic_source,
+                                attributes#'second_party_cookie_id' as second_party_cookie_id,
+                                entities#'Web_Session';
+
+events_data = FILTER events_data BY page_url MATCHES '.*Aklamio.*';
+
+-- remove the output directory if exists
+rmf /user/pp_dt_mkt_batch/mkt/stg_akla_page_events/stg_akla_eap_events_pre;
+
+-- store results in specified output location
+STORE events_data INTO '/user/pp_dt_mkt_batch/mkt/stg_akla_page_events/stg_akla_eap_events_pre' USING PigStorage('\u0007');
+
+eventData = LOAD '/user/pp_dt_mkt_batch/mkt/stg_akla_page_events/stg_akla_eap_events_pre' USING PigStorage('\u0007') AS (epoch_timestamp_client:chararray,event_time:chararray,customer_id:chararray,encrypted_customer_id:chararray,user_guid:chararray,user_session_guid:chararray,page_url:chararray,page_group:chararray,page_name:chararray,traffic_source:chararray,second_party_cookie_id:chararray,Web_Session:chararray);
+
+web_session_entities_data = LOAD 'eap-prod://entities' USING com.paypal.dm.eap.engine.data.catalog.pig.EntityLoader('{ "startDate": "$EAP_START_DT", "endDate" : "$EAP_END_DT", "timeType" : "load","fileStreamType":"FPTI", "range" : "2", "rangeType" : "DAYS", "entityName": "Web_Session", "entityAttributes": { "all": "true" }}','/apps/dm/eap/prod/conf/eap_mapping_prod.xml');
+
+web_session_entity_attributes = EntityAttributesComputation(web_session_entities_data,'Web_Session');
+
+joined_events_web_session_entities = JOIN eventData BY Web_Session,web_session_entity_attributes BY entityId;
+
+-- load events from eap
+events_eap = FOREACH joined_events_web_session_entities GENERATE
+                                (chararray)eventData::epoch_timestamp_client as epoch_timestamp_client,
+                                (chararray)eventData::event_time as event_time,
+                                (chararray)eventData::customer_id as customer_id,
+                                (chararray)eventData::encrypted_customer_id as encrypted_customer_id,
+                                (chararray)eventData::user_guid as user_guid,
+                                (chararray)eventData::user_session_guid as user_session_guid,
+                                (chararray)eventData::page_url as page_url,
+                                (chararray)eventData::page_group as page_group,
+                                (chararray)eventData::page_name as page_name,
+                                (chararray)eventData::traffic_source as traffic_source,
+                                (chararray)eventData::second_party_cookie_id as second_party_cookie_id,
+                                (chararray)web_session_entity_attributes::Web_Session#'session_end_gmt' as session_end_gmt,
+                                (chararray)web_session_entity_attributes::Web_Session#'session_start_gmt' as session_start_gmt,
+                                (chararray)web_session_entity_attributes::Web_Session#'geo_country' as geo_country
+                                ;
+
+
+rmf /user/pp_dt_mkt_batch/alka_page_events/stg_alka_eap_events;
+
+store events_eap into '/user/pp_dt_mkt_batch/alka_page_events/stg_alka_eap_events' USING PigStorage('\u0001');
+
+*******************************************************************************************************************
+Extract aklamio cust signup--MD_EAP_AKLA_CUST_SIGNUP2
+
+*******************************************************************************************************************
+[syerusu@lvsdmetl17 ~]$ cat /x/home/pp_dt_mkt_batch/mkt/pig/getAklamioSignups2.pig
+-------------------
+--- Libraries
+--------------------
+
+REGISTER /x/home/pp_dt_mkt_batch/M360/lib/m360.jar;
+REGISTER /x/home/pp_dt_mkt_batch/M360/lib/URLParser.jar;
+REGISTER '/x/home/dm_eap_batch_prod/eap/prod/hdp/lib/*.jar';
+
+IMPORT '/x/home/dm_eap_batch_prod/eap/prod/pig/EntityAttributesMacro.pig';
+
+--------------------
+--- Setup
+--------------------
+
+SET mapreduce.job.queuename dt_marketing;
+SET default_parallel 300;
+SET mapred.task.timeout 7200000;
+SET mapreduce.output.fileoutputformat.compress false;
+
+DEFINE ToDate org.paypal.m360.udf.eval.ToDate();
+DEFINE MergeMktgChannelReferrerType org.paypal.m360.udf.eval.MergeMktgChannelReferrerType();
+DEFINE IsEventEpochAmbiguous org.paypal.m360.udf.eval.IsEventEpochAmbiguous();
+DEFINE URLParser com.paypal.dt.pig.udf.URLParser();
+DEFINE SurrogateKey org.paypal.m360.udf.eval.SurrogateKey();
+
+events_data_prep1 = LOAD 'eap-prod://event' USING com.paypal.dm.eap.engine.data.catalog.pig.EventLoader('{"startDate" : "$EAP_START_DT", "endDate" : "$EAP_END_DT", "timeType" : "load" , "fileStreamType" : "FPTI", "attributes" : {"all" : "true"}, "entities" : {"all" : "true"}, "derivedEvents" : "false", "useOnlyCertifiedDerivedEvents" : "false" }','/apps/dm/eap/prod/conf/eap_mapping_prod.xml');
+
+-- load events from eap
+events_data1 = FOREACH events_data_prep1 GENERATE
+                                attributes#'epoch_timestamp_client' as  epoch_timestamp_client,
+                                attributes#'event_time' as  event_time,
+                                attributes#'customer_id' as  customer_id,
+                                attributes#'encrypted_customer_id' as  encrypted_customer_id,
+                                attributes#'user_guid' as user_guid,
+                                attributes#'user_session_guid' as user_session_guid,
+                                attributes#'page_url' as  page_url,
+                                attributes#'page_group' as page_group,
+                                attributes#'page_name' as page_name,
+                                attributes#'traffic_source' as traffic_source,
+                                attributes#'second_party_cookie_id' as second_party_cookie_id,
+                                entities#'Web_Session' as Web_Session
+                                ;
+
+
+events_user_guid = LOAD '/user/pp_dt_mkt_batch/alka_page_events/stg_alka_eap_events' USING PigStorage('\u0001') AS (epoch_timestamp_client:chararray,event_time:chararray,customer_id:chararray,encrypted_customer_id:chararray,user_guid:chararray,user_session_guid:chararray,page_url:chararray,page_group:chararray,page_name:chararray,traffic_source:chararray,second_party_cookie_id:chararray,Web_Session:chararray);
+
+events_joined_by_guid = join events_user_guid by user_guid,events_data1 by user_guid;
+
+events_eap1 = FOREACH events_joined_by_guid GENERATE
+                                (chararray)events_data1::customer_id as customer_id,
+                                (chararray)events_data1::encrypted_customer_id as encrypted_customer_id,
+                                (chararray)events_data1::user_guid as user_guid,
+                                (chararray)events_data1::user_session_guid as user_session_guid,
+                                (chararray)events_data1::page_url as page_url,
+                                (chararray)events_user_guid::page_url as pre_page_url,
+                                (chararray)events_data1::page_group as page_group,
+                                (chararray)events_data1::page_name as page_name,
+                                (chararray)events_data1::traffic_source as traffic_source,
+                                (chararray)events_data1::second_party_cookie_id as second_party_cookie_id,
+                                (chararray)events_data1::Web_Session as Web_Session
+                                ;
+
+rmf /user/pp_dt_mkt_batch/mkt/stg_akla_page_events/stg_akla_eap_events_pre1;
+
+store events_eap1 into '/user/pp_dt_mkt_batch/mkt/stg_akla_page_events/stg_akla_eap_events_pre1' USING PigStorage('\u0001');
+
+eventData1 = LOAD '/user/pp_dt_mkt_batch/mkt/stg_akla_page_events/stg_akla_eap_events_pre1' USING PigStorage('\u0001') AS (customer_id:chararray,encrypted_customer_id:chararray,user_guid:chararray,user_session_guid:chararray,page_url:chararray,pre_page_url:chararray,page_group:chararray,page_name:chararray,traffic_source:chararray,second_party_cookie_id:chararray,Web_Session:chararray);
+
+web_session_entities_data1 = LOAD 'eap-prod://entities' USING com.paypal.dm.eap.engine.data.catalog.pig.EntityLoader('{ "startDate": "$EAP_START_DT", "endDate" : "$EAP_END_DT", "timeType" : "load","fileStreamType":"FPTI", "range" : "2", "rangeType" : "DAYS", "entityName": "Web_Session", "entityAttributes": { "all": "true" }}','/apps/dm/eap/prod/conf/eap_mapping_prod.xml');
+
+web_session_entity_attributes1 = EntityAttributesComputation(web_session_entities_data1,'Web_Session');
+
+joined_events_web_session_entities1 = JOIN eventData1 BY Web_Session,web_session_entity_attributes1 BY entityId;
+
+-- load events from eap
+fnl_events_eap1 = FOREACH joined_events_web_session_entities1 GENERATE
+                                (chararray)eventData1::customer_id as customer_id,
+                                (chararray)eventData1::encrypted_customer_id as encrypted_customer_id,
+                                (chararray)eventData1::user_guid as user_guid,
+                                (chararray)eventData1::user_session_guid as user_session_guid,
+                                (chararray)eventData1::page_url as page_url,
+                                (chararray)eventData1::pre_page_url as pre_page_url,
+                                (chararray)eventData1::page_group as page_group,
+                                (chararray)eventData1::page_name as page_name,
+                                (chararray)eventData1::traffic_source as traffic_source,
+                                (chararray)eventData1::second_party_cookie_id as second_party_cookie_id,
+                                (chararray)web_session_entity_attributes1::Web_Session#'session_end_gmt' as session_end_gmt,
+                                (chararray)web_session_entity_attributes1::Web_Session#'session_start_gmt' as session_start_gmt,
+                                (chararray)web_session_entity_attributes1::Web_Session#'geo_country' as geo_country
+                              ;
+
+events_fil_by_cust = FILTER fnl_events_eap1 BY (customer_id is not null);
+
+events_eap_fnl = FOREACH events_fil_by_cust GENERATE
+                                customer_id,
+                                encrypted_customer_id,
+                                user_guid,
+                                user_session_guid,
+                                SUBSTRING(page_url,0,499),
+                                SUBSTRING(pre_page_url,0,499),
+                                page_group,
+                                page_name,
+                                traffic_source,
+                                second_party_cookie_id,
+                                ToDate((long)session_start_gmt, 'yyyy-MM-dd hh:mm:ss') as session_start_gmt,
+                                ToDate((long)session_end_gmt, 'yyyy-MM-dd hh:mm:ss') as session_end_gmt,
+                                geo_country
+                              ;
+
+rmf /user/pp_dt_mkt_batch/alka_page_events/pre_stg_alka_eap_events1;
+store events_eap_fnl into '/user/pp_dt_mkt_batch/alka_page_events/pre_stg_alka_eap_events1' USING PigStorage('');
+
+--events_grpby_cust = group events_fil_by_cust by (customer_id,second_party_cookie_id,session_start_gmt);
+--events_grpby_cust_gen = foreach events_grpby_cust generate flatten(group) as (customer_id,second_party_cookie_id,session_start_gmt);
+
+--cust_distinct = group events_grpby_cust_gen by (customer_id,second_party_cookie_id);
+--cust_distinct_gen = foreach cust_distinct
+--                       generate
+  --                  flatten(group) as (customer_id,second_party_cookie_id),
+    --                 MIN(events_grpby_cust_gen.session_start_gmt) as min_session_start_dt,
+      --               MAX(events_grpby_cust_gen.session_start_gmt) as max_session_start_dt
+        --             ;
+
+--rmf /user/pp_dt_mkt_batch/alka_page_events/stg_alka_eap_events1;
+
+--store cust_distinct_gen into '/user/pp_dt_mkt_batch/alka_page_events/stg_alka_eap_events1' USING PigStorage('');

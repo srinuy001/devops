@@ -1,0 +1,157 @@
+BrightEdge from M360 pull--- MD_MKT_M360_BRIGHTEDGE_STMPY_WRK
+
+[syerusu@lvsdmetl17 ~]$ cat /etl/LVS/dmetldata01/M360/hive/hql/BrightEdge_wrk.hql
+--set hive.auto.convert.join = false;
+
+--#set hive.mapjoin.localtask.max.memory.usage=0.90;
+set hive.auto.convert.join=false;
+
+INSERT OVERWRITE DIRECTORY '${env:M360_HDFS_WORKING}/BrightEdge_wrk'
+select
+distinct
+MktEvents.edate,
+regexp_replace(MktEvents.edate,'-',''),
+ConvAttr.edate,
+MktEvents.user_session_guid,
+MktEvents.user_guid,
+MktEvents.eap_event_id,
+ConvEvents.conv_event_id,
+
+case
+  when keyword_value='#' then 'not provided'
+  else regexp_replace(MktEvents.keyword_value,'\t',' ')
+end,
+
+regexp_replace(Sess.referring_webpage_value,'\t',' '),
+regexp_replace(regexp_replace (parse_url(Sess.referring_webpage_value,'HOST'),'www.',''),'\t',' '),
+regexp_replace(Sess.landing_webpage_value,'\t',' '),
+case
+  when device_type = 'COMPUTER' then 'Desktop'
+  when device_type = 'MOBILE' then 'Smartphone'
+  when device_type = 'TABLET' then 'Tablet'
+end as device_type,
+
+lower(split(regexp_replace(Sess.landing_webpage_value,'\t',' '),'/')[2]),
+case
+  when upper(split(regexp_replace(Sess.landing_webpage_value,'\t',' '),'/')[3]) = 'WEBAPPS' then 'US'
+  else upper(split(regexp_replace(Sess.landing_webpage_value,'\t',' '),'/')[3])
+end as Accounts,
+
+ConvPages.page_group_type,
+Sess.session_duration_in_min,
+Sess.page_visit_count
+
+
+from
+
+${env:M360_MAIN_DB}.FactMktEvents MktEvents
+
+inner join ${env:M360_MAIN_DB}.FactSessAttrib Sess
+on MktEvents.user_session_guid = Sess.user_session_guid
+and MktEvents.edate = Sess.edate
+
+Left outer join ${env:M360_MAIN_DB}.FactConvAttributions ConvAttr
+on MktEvents.eap_event_id = ConvAttr.mkt_event_id
+and ConvAttr.attribution_type='last'
+and ConvAttr.event_type = 'cl'
+and ConvAttr.mkt_channel = 'SEO'
+
+Left outer join ${env:M360_MAIN_DB}.FactConvEvents ConvEvents
+on ConvEvents.conv_event_id = ConvAttr.conv_event_id
+and ConvEvents.edate = ConvAttr.edate
+
+Left outer join ${env:M360_MAIN_DB}.CtrlConvPages ConvPages
+on ConvEvents.conv_page_group_value = ConvPages.page_group_value
+and ConvPages.page_group_type in ('AcctUpgConsumer2BizFin', 'BizAcctSUFin', 'ConsumerSUFin')
+
+Where MktEvents.edate between  '${hiveconf:EventStart}' and  '${hiveconf:EventEnd}'
+and Sess.landing_webpage_value like '%paypal.com%'
+and Sess.landing_webpage_value not like '%mplx%'
+;
+
+*************************************************************************************************************
+
+BrightEdge from M360 pull--D_MKT_M360_BRIGHTEDGE_STMPY_WRK_2
+
+*************************************************************************************************************
+[syerusu@lvsdmetl17 ~]$ cat /etl/LVS/dmetldata01/M360/hive/hql/BrightEdge_wrk2.hql
+
+
+set hive.auto.convert.join=false;
+
+set mapreduce.map.java.opts=-server -Xmx4048m -Djava.net.preferIPv4Stack=true;
+set mapreduce.reduce.java.opts=-server -Xmx6072m -Djava.net.preferIPv4Stack=true;
+set mapreduce.map.memory.mb=4096;
+set mapreduce.reduce.memory.mb=7000;
+
+
+
+INSERT OVERWRITE DIRECTORY '${env:M360_HDFS_WORKING}/BrightEdge_wrk2'
+select
+mkt_event_date,
+mkt_event_date_split,
+keyword_value,
+landing_webpage_value,
+ref_domain,
+device_type,
+
+count(distinct user_session_guid) as Visits_Count,
+count(1) as page_views_new,
+sum(sess_time_on_site)*60 as time_on_site_in_sec,
+sum(case when sess_time_on_site < 0.01 and sess_page_visit_count = 1 then 1 else 0 end) as bounce_count,
+sum(case when page_group_type = 'AcctUpgConsumer2BizFin' then 1 else 0 end) as AcctUpgConsumer2BizFin_count,
+sum(case when page_group_type = 'BizAcctSUFin' then 1 else 0 end) as BizAcctSUFin_count,
+sum(case when page_group_type = 'ConsumerSUFin' then 1 else 0 end) as ConsumerSUFin_count
+
+
+from
+
+${env:M360_WORKING_DB}.BrightEdge_wrk wrk
+
+inner join (select distinct regexp_replace(SearchEngine,'www.','') as SearchEngine_d from ${env:M360_MAIN_DB}.DimSearchEngine) searchengines
+on wrk.ref_domain =  searchengines.SearchEngine_d
+
+inner join ${env:M360_MAIN_DB}.BrightEdge_Accounts accounts
+on wrk.Accounts = accounts.Accounts
+
+where (conv_event_date is null or conv_event_date between mkt_event_date and date_add(mkt_event_date,7))
+and device_type in ('Smartphone','Desktop','Tablet')
+and Landing_Domain = 'www.paypal.com'
+
+group by
+mkt_event_date,
+mkt_event_date_split,
+keyword_value,
+landing_webpage_value,
+ref_domain,
+device_type;
+
+*************************************************************************************************************
+
+BrightEdge Gen Wrk to Main--MD_MKT_M360_BRIGHTEDGE_STMPY_GENWRK_TO_MAIN
+
+*************************************************************************************************************
+
+[syerusu@lvsdmetl17 ~]$ cat /etl/LVS/dmetldata01/M360/hive/hql/BrightEdge_d.hql
+
+-- IO Part
+FROM ${env:M360_WORKING_DB}.BrightEdge_wrk2 src
+INSERT OVERWRITE DIRECTORY '${env:M360_HDFS_MAIN}/BrightEdge/2016-12-28' SELECT mkt_event_date_split,keyword_value,landing_webpage_value,ref_domain,device_type,visit_count,page_view_count,time_on_site,bounce_count,acctupgconsumer2bizfin_count,bizacctsufin_count,consumersufin_count  WHERE src.mkt_event_date = '2016-12-28'
+;
+-- Add Part
+use ${env:M360_MAIN_DB};ALTER TABLE BrightEdge ADD IF NOT EXISTS PARTITION (EDate='2016-12-28') location '${env:M360_HDFS_MAIN}/BrightEdge/2016-12-28';
+*************************************************************************************************************
+
+BrightEdge from M360 pull--D_MKT_M360_BRIGHTEDGE_STMPY_D_SPLIT 
+
+*************************************************************************************************************
+
+[syerusu@lvsdmetl17 ~]$ cat /etl/LVS/dmetldata01/M360/hive/hql/BrightEdge_d.hql
+
+-- IO Part
+FROM ${env:M360_WORKING_DB}.BrightEdge_wrk2 src
+INSERT OVERWRITE DIRECTORY '${env:M360_HDFS_MAIN}/BrightEdge/2016-12-28' SELECT mkt_event_date_split,keyword_value,landing_webpage_value,ref_domain,device_type,visit_count,page_view_count,time_on_site,bounce_count,acctupgconsumer2bizfin_count,bizacctsufin_count,consumersufin_count  WHERE src.mkt_event_date = '2016-12-28'
+;
+-- Add Part
+use ${env:M360_MAIN_DB};ALTER TABLE BrightEdge ADD IF NOT EXISTS PARTITION (EDate='2016-12-28') location '${env:M360_HDFS_MAIN}/BrightEdge/2016-12-28';
+

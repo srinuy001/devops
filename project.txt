@@ -1,0 +1,117 @@
+
+To view first 5 line : b= LIMIT a 5;
+a= load '/usr/horton/flightdelays/2008.csv' using PigStorage(',') AS (Year,Month,DayofMonth,DayofWeek,DepTime,UniqueCarrier,FlightNum,ArrDelay,Origin,Dest);
+To gzip the bz2 compressed file : bzip2 -d 2007*
+
+Task 1:
+
+sudo -u hdfs hadoop fs -mkdir -p /user/horton/flightdelays
+
+hadoop dfs -put /home/horton/datasets/flightdelays/2008.csv /user/horton/flightdelays
+
+
+Task 2:
+
+flightdelays_clean.pig
+
+a= load '/user/horton/flightdelays/2008.csv' using PigStorage(',') AS (Year:int,Month:int,DayofMonth,DayofWeek,DepTime,CRSDepTime,ArrTime,CRSArrTime,TailNum,ActualElapsedTime:int,CRSElapsedTime:int,AirTime,DepDelay,Distance,TaxiIn,TaxiOut,Cancelled,CancellationCode,Diverted,CarrierDelay,NASDelay,SecurityDelay:chararray,LateAircraftDelay:int,UniqueCarrier:int,FlightNum:double,ArrDelay:int,Origin:chararray,Dest);
+b= filter a by DepTime != 'NA';
+c= foreach b generate Year,Month,DayofMonth,DepTime,UniqueCarrier,FlightNum,ArrDelay,Origin,Dest ;
+d= store c into '/user/horton/flightdelays_clean' using PigStorage(',');
+
+
+
+Task 3:
+
+3.1
+cleaned_total.pig
+
+a= load '/user/horton/flightdelays_clean';
+b= group a all;
+c= foreach b generate COUNT(a);
+d= dump c;
+e= store c into '/user/horton/cleaned_total';
+
+
+3.2
+
+denver_total.pig
+
+a= load '/user/horton/flightdelays_clean';
+b= filter a generate Dest == 'DEN' ;
+c=  group b all;
+d= foreach c generate count(b);
+dump d;
+e= store d into '/user/horton/denver_total' ;
+
+3.3
+
+denver_late.pig
+
+a= load '/user/horton/flightdelays_clean';
+b= filter a by Dest == 'DEN' ;
+c= filter b by ArrTime >= 60;
+d= foreach c generate count(a);
+dump d;
+e= store d into '/user/horton/denver_late' ;
+
+
+4.
+set hive.exec.dynamic.partition=true;  
+set hive.exec.dynamic.partition.mode=nonstrict;
+create external table flightdelay1(DayofMonth INT,DepTime INT,UniqueCarrier string,FlightNum INT,ArrTime INT,Origin string,Dest string) partitioned by (Year INT,Month INT)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE
+LOCATION '/user/horton/flightdelays_clean';
+load data inpath '/user/cloudera/2008.csv' OVERWRITE INTO TABLE flightdelay1 ;
+
+note : when u use inpath the source data will move (once the cmd executed src data will remove)
+
+5.
+
+set exectype=tez;
+a= load 'flightdelay' using  org.apache.hive.hcatalog.pig.HCatLoader();
+b= filter a by arrtime <= 0;
+c= order b by arrtime DESC; 
+d= store c into '/user/horton/flightdelays_nonzero';
+
+6.
+
+flightdelays.hive
+
+select year,AVG(arrtime) from flightdelay where dest = "DEN"  group by year;
+
+select year,month,AVG(arrtime) from flightdelay where origin = "LAX" AND dest = "SFO" group by year,month; 
+
+select origin,dest from flightdelay where MAX(arrdealy) group by origin;
+
+7.
+
+create table sfo_weather_txt(station_name string,year int,month int,dayofmonth int,precipitation int,temperature_max int,temperature_min int) STORED AS TEXTFILE;
+create table sfo_weather_orc (station_name string,year int,month int,dayofmonth int,precipitation int,temperature_max int,temperature_min int) STORED AS ORC;
+load data inpath '/user/cloudera/sfo_weather.csv' OVERWRITE INTO TABLE sfo_weather_txt;
+insert into sfo_weather_orc select * from sfo_weather_txt;
+
+8.
+
+set hive.execution.engine=tez;
+create table if not exist flights_weather(station_name string,year int,month int,dayofmonth int,precipitation int,temperature_max int,temperature_min int)
+row format delimited fields terminated by ',' stored as TEXTFILE;
+select f.year,f.month,f.dayofmonth from flightdelays f join sfo_weather s ON (f.year = s.year) where f.origin= "SFO";
+select * from flightdelay f left join sfo_weather s on(f.year=s.year) where (select temparature_max,temparature_min from sfo_weather);
+
+
+9.
+
+set hive.exec.dynamic.partition=true;  
+set hive.exec.dynamic.partition.mode=nonstrict;
+create table weather_partitioned(DayofMonth INT,DepTime INT,UniqueCarrier string,FlightNum INT,ArrTime INT,Origin string,Dest string) partitioned by (Year INT,Month INT)
+row format delimiter fields terminated by ',' stored AS ORC;
+insert into weather_partitioned partition (year='2008' ,month="janaury") seelct * from sfo_weather; 
+
+10.
+
+ mysql -u root -p
+ 
+ create databse flightinfo;
+ create table flightinfo.weather(station varchar(100),year int(11),month int(11));        
+  sqoop export --connect jdbc:mysql://localhost/flightinfo --table weather  --export-dir /user/horton/

@@ -1,0 +1,246 @@
+Extract Page evetns from EAP FPTI source--C_PP_FACT_MKT_CUST_PAGE_EVNT
+
+[syerusu@lvsdmetl17 ~]$ cat /x/home/pp_dt_mkt_batch/mkt/pig/getPageMetrics.pig
+--------------------
+--- Libraries
+--------------------
+
+REGISTER /x/home/pp_dt_mkt_batch/M360/lib/m360.jar;
+REGISTER /x/home/pp_dt_mkt_batch/M360/lib/URLParser.jar;
+REGISTER '/x/home/dm_eap_batch_prod/eap/prod/hdp/lib/*.jar';
+
+IMPORT '/x/home/dm_eap_batch_prod/eap/prod/pig/EntityAttributesMacro.pig';
+
+--------------------
+--- Setup
+--------------------
+
+SET mapreduce.job.queuename dt_marketing;
+SET default_parallel 300;
+SET mapred.task.timeout 7200000;
+SET mapreduce.output.fileoutputformat.compress false;
+
+DEFINE ToDate org.paypal.m360.udf.eval.ToDate();
+DEFINE MergeMktgChannelReferrerType org.paypal.m360.udf.eval.MergeMktgChannelReferrerType();
+DEFINE IsEventEpochAmbiguous org.paypal.m360.udf.eval.IsEventEpochAmbiguous();
+DEFINE URLParser com.paypal.dt.pig.udf.URLParser();
+DEFINE SurrogateKey org.paypal.m360.udf.eval.SurrogateKey();
+
+events_data_prep = LOAD 'eap-prod://event' USING com.paypal.dm.eap.engine.data.catalog.pig.EventLoader('{"startDate" : "$EAP_START_DT", "endDate" : "$EAP_END_DT", "timeType" : "load" , "fileStreamType" : "FPTI", "attributes" : {"all" : "true"}, "entities" : {"all" : "true"}, "derivedEvents" : "false", "useOnlyCertifiedDerivedEvents" : "false" }','/apps/dm/eap/prod/conf/eap_mapping_prod.xml');
+
+-- load events from eap
+events_data = FOREACH events_data_prep GENERATE
+                                eapVars.id as id,
+                                eapVars.name as name,
+                                eapVars.type as type,
+                                eapVars.subtype as subtype,
+                                eapVars.filestream as filestream,
+                                eapVars.timestamp as timestamp,
+                                eapVars.loadId as loadId,
+                                attributes#'epoch_timestamp_client' as  epoch_timestamp_client,
+                                attributes#'event_type' as  event_type,
+                                attributes#'event_time' as  event_time,
+                                attributes#'gmt_offset_minutes' as  gmt_offset_minutes,
+                                attributes#'landing_page_url' as  landing_page_url,
+                                attributes#'page_group' as  page_group,
+                                attributes#'page_name' as  page_name,
+                                attributes#'page_group_link_name' as  page_group_link_name,
+                                attributes#'user_guid' as  user_guid,
+                                attributes#'customer_id' as  customer_id,
+                                attributes#'encrypted_customer_id' as  encrypted_customer_id,
+                                attributes#'user_session_guid' as user_session_guid,
+                                attributes#'page_url' as  page_url,
+                                attributes#'referring_url' as referring_url,
+                                attributes#'experimentation_experience' as experimentation_experience,
+                                attributes#'experimentation_treatment' as experimentation_treatment,
+                                attributes#'flow_logging_id' as flow_logging_id,
+                                attributes#'flow_token' as flow_token,
+                                entities#'Web_Session';
+
+-- remove the output directory if exists
+rmf /user/pp_dt_mkt_batch/mkt/stg_page_events/stg_eap_events_pre;
+
+-- store results in specified output location
+STORE events_data INTO '/user/pp_dt_mkt_batch/mkt/stg_page_events/stg_eap_events_pre' USING PigStorage('\u0007');
+
+eventData = LOAD '/user/pp_dt_mkt_batch/mkt/stg_page_events/stg_eap_events_pre' USING PigStorage('\u0007') AS (id:long,name:chararray,type:chararray,subtype:chararray,filestream:chararray,timestamp:long,loadId:int,epoch_timestamp_client:chararray,event_type:chararray,event_time:chararray,gmt_offset_minutes:chararray,landing_page_url:chararray,page_group:chararray,page_name:chararray,page_group_link_name:chararray,user_guid:chararray,customer_id:chararray,encrypted_customer_id:chararray,user_session_guid:chararray,page_url:chararray,referring_url:chararray,experimentation_experience:chararray,experimentation_treatment:chararray,flow_logging_id:chararray,flow_token:chararray,Web_Session:chararray);
+
+web_session_entities_data = LOAD 'eap-prod://entities' USING com.paypal.dm.eap.engine.data.catalog.pig.EntityLoader('{ "startDate": "$EAP_START_DT", "endDate" : "$EAP_END_DT", "timeType" : "load","fileStreamType":"FPTI", "range" : "1", "rangeType" : "DAYS", "entityName": "Web_Session", "entityAttributes": { "all": "true" }}','/apps/dm/eap/prod/conf/eap_mapping_prod.xml');
+
+web_session_entity_attributes = EntityAttributesComputation(web_session_entities_data,'Web_Session');
+
+joined_events_web_session_entities = JOIN eventData BY Web_Session,web_session_entity_attributes BY entityId;
+
+-- load events from eap
+events_eap = FOREACH joined_events_web_session_entities GENERATE
+                                (chararray)eventData::id as id,
+                                (chararray)eventData::name as name,
+                                (chararray)eventData::type as type,
+                                (chararray)eventData::subtype as subtype,
+                                (chararray)eventData::filestream as filestream,
+                                (chararray)eventData::timestamp as timestamp,
+                                (chararray)eventData::loadId as loadId,
+                                (chararray)eventData::epoch_timestamp_client as epoch_timestamp_client,
+                                (chararray)eventData::event_type as event_type,
+                                (chararray)eventData::event_time as event_time,
+                                (chararray)eventData::gmt_offset_minutes as gmt_offset_minutes,
+                                (chararray)eventData::landing_page_url as landing_page_url,
+                                (chararray)eventData::page_group as page_group,
+                                (chararray)eventData::page_name as page_name,
+                                (chararray)eventData::page_group_link_name as page_group_link_name,
+                                (chararray)eventData::user_guid as user_guid,
+                                (chararray)eventData::customer_id as customer_id,
+                                (chararray)eventData::encrypted_customer_id as  encrypted_customer_id,
+                                (chararray)eventData::user_session_guid as user_session_guid,
+                                (chararray)eventData::page_url as  page_url,
+                                (chararray)eventData::referring_url as referring_url,
+                                (chararray)eventData::experimentation_experience as experimentation_experience,
+                                (chararray)eventData::experimentation_treatment as experimentation_treatment,
+                                (chararray)eventData::flow_logging_id as flow_logging_id,
+                                (chararray)eventData::flow_token as flow_token,
+                                (chararray)web_session_entity_attributes::Web_Session#'session_end_gmt' as session_end_gmt,
+                                (chararray)web_session_entity_attributes::Web_Session#'session_start_gmt' as session_start_gmt,
+                                (chararray)web_session_entity_attributes::Web_Session#'geo_country' as geo_country
+                                ;
+
+events_eap_filter = FILTER events_eap BY(
+page_name matches '.*Add Bank Redesign: Enter Bank Details.*' or
+page_group matches '.*Add Bank Redesign: Enter Bank Details.*' or
+
+page_name matches '.*main:onbrd:fundingsource:bank:add.*' or
+page_group matches '.*main:onbrd:fundingsource:bank:add.*' or
+
+page_name matches '.*main:onbrd:fundingsource:cc-bank.*' or
+page_group matches '.*main:onbrd:fundingsource:cc-bank.*' or
+
+page_name matches '.*Add Bank: Enter Bank Details.*' or
+page_group matches '.*Add Bank: Enter Bank Details.*' or
+
+page_name matches '.*main:acsrv:fundingsource:bank:add-bank.*' or
+page_group matches '.*main:acsrv:fundingsource:bank:add-bank.*' or
+
+page_name matches '.*main:fmx:eas::addbank:cardnobank::.*' or
+page_group matches '.*main:fmx:eas::addbank:cardnobank::.*' or
+
+page_name matches '.*main:acsrv:fundingsource:bank:add-bank:revamp-phase1-us::.*' or
+page_group matches '.*main:acsrv:fundingsource:bank:add-bank:revamp-phase1-us::.*' or
+
+page_name matches '.*main:fab:::add-confirm.*' or
+page_group matches '.*main:fab:::add-confirm.*' or
+
+page_name matches '.*main:fab:profile::add-confirm.*' or
+page_group matches '.*main:fab:profile::add-confirm.*' or
+
+page_name matches '.*main:fab:signup::add-confirm.*' or
+page_group matches '.*main:fab:signup::add-confirm.*' or
+
+page_name matches '.*Add Bank Redesign: Bank Profile.*' or
+page_group matches '.*Add Bank Redesign: Bank Profile.*' or
+
+page_name matches '.*main:walletweb:wallet:add:bankadd:.*' or
+page_group matches '.*main:walletweb:wallet:add:bankadd:.*' or
+
+page_name matches '.*main:walletweb:wallet:add:bankconfirmRD:.*' or
+page_group matches '.*main:walletweb:wallet:add:bankconfirmRD:.*' or
+
+page_name matches '.*main:wc:out:nonflow:landing:::.*' or
+page_group matches '.*main:wc:out:nonflow:landing.*' or
+
+page_name matches '.*main:mktg:usa::ppwc:home:usa.*' or
+page_group matches '.*main:mktg:usa::ppwc:home.*' or
+
+page_name matches '.*ppme:manage:::manage:::.*' or
+page_group matches '.*ppme:manage:::manage.*' or
+
+page_name matches '.*ppme:create:::create:::.*' or
+page_group matches '.*ppme:create:::create.*' or
+
+page_name matches '.*ppme:landing:::landing:::.*' or
+page_group matches '.*ppme:landing:::landing.*' or
+
+page_name matches '.*ppme:create:::grab:::.*' or
+page_group matches '.*ppme:create:::grab.*'
+
+--page_name matches '.*main:wps:ux:button:start.*' or
+--page_group matches '.*main:wps:ux:button:start.*' or
+
+--page_name matches '.*main:wps:ux:3pcart:start.*' or
+--page_group matches '.*main:wps:ux:3pcart:start.*' or
+
+--page_name matches '.*main:wps:ux:ppcart:start.*' or
+--page_group matches '.*main:wps:ux:ppcart:start.*'
+
+--page_name matches '.*Add Bank Redesign: Bank Profile.*' or
+--page_group matches '.*Add Bank Redesign: Bank Profile.*' or
+);
+
+-- replace nulls with '#'
+events = foreach events_eap_filter {
+        session_duration_in_min = ((long)session_end_gmt - (long)session_start_gmt)/(60*1000);
+        event_srv_ts = ToDate((long)event_time, 'yyyy-MM-dd hh:mm:ss');
+
+        epoch_timestamp_client_derived = (long)epoch_timestamp_client + ((long)gmt_offset_minutes * 60 * 1000);
+        event_client_ts = ToDate((long)epoch_timestamp_client_derived, 'yyyy-MM-dd hh:mm:ss');
+
+        session_start_gmt_ts = ToDate((long)session_start_gmt, 'yyyy-MM-dd hh:mm:ss');
+        session_end_gmt_ts = ToDate((long)session_end_gmt, 'yyyy-MM-dd hh:mm:ss');
+        generate
+            event_type as event_type_value,
+
+            ToDate((long)session_start_gmt) as session_start_gmt_date,
+            (session_start_gmt_ts is not null ? session_start_gmt_ts : '9999-12-31  12:00:00') as session_start_gmt_ts,
+            (long)session_start_gmt as session_start_gmt_epoch,
+
+            ToDate((long)session_end_gmt, 'yyyy-MM-dd') as session_end_gmt_date,
+            (session_end_gmt_ts is not null ? session_end_gmt_ts : '9999-12-31  12:00:00') as session_end_gmt_ts,
+            (long)session_end_gmt as session_end_gmt_epoch,
+
+            ToDate((long)event_time) as event_srv_date,
+            (event_srv_ts is not null ? event_srv_ts : '9999-12-31  12:00:00') as event_srv_ts,
+            (long)event_time as event_srv_epoch,
+
+            ToDate((long)epoch_timestamp_client_derived) as event_client_date,
+            (event_client_ts is not null ? event_client_ts : '9999-12-31  12:00:00') as event_client_ts,
+            (long)epoch_timestamp_client_derived as event_client_epoch,
+
+            (user_guid is not null ? user_guid : '#') as user_guid,
+            (customer_id is not null ? customer_id : '#') as customer_id,
+            (encrypted_customer_id is not null ? encrypted_customer_id : '#') as encrypted_customer_id,
+
+            SurrogateKey(CONCAT((page_group is not null ? page_group : '#'),(page_name is not null ? page_name : '#'))) as page_event_hash,
+            (page_group_link_name is not null ? page_group_link_name : '#') as page_group_link_name,
+            (page_group is not null ? page_group : '#') as page_group,
+            (page_name is not null ? page_name : '#') as page_name,
+
+            (user_session_guid is not null ? user_session_guid : '#') as user_session_guid,
+            (geo_country is not null ? geo_country : '#') as ip_cntry_code,
+
+            (experimentation_experience is not null ? experimentation_experience : '#') as experimentation_experience,
+            (experimentation_treatment is not null ? experimentation_treatment : '#') as experimentation_treatment,
+            (flow_logging_id is not null ? flow_logging_id : '#') as flow_logging_id,
+            (flow_token is not null ? flow_token : '#') as flow_token
+
+            ;
+};
+
+
+--event_page_list_distinct = LOAD '/apps/mktg/m360/prod/data/Control/CtrlEventPages/CtrlEventPages.lst' USING PigStorage(',') as (page_list:chararray);
+--event_page_list = foreach event_page_list_distinct generate page_list;
+
+--page_group_events_list_all = join event_page_list by page_list, events by page_group;
+--page_name_events_list_all = join event_page_list by page_list, events by page_name;
+--page_events_list_all = UNION page_group_events_list_all, page_name_events_list_all;
+--page_events_list_dst = DISTINCT page_events_list_all;
+
+-- sessiona_page_visit = foreach page_events_list_all generate user_session_guid;
+-- all_events_sessiona_page_visit = join events by user_session_guid, sessiona_page_visit by user_session_guid;
+
+--page_events_list_all_final = foreach events generate $0..;
+
+-- cleanup before storing
+rmf /user/pp_dt_mkt_batch/page_events/stg_eap_events;
+--rmf /apps/mktg/m360/prod/data/Stage/stg_eap_events;
+
+-- store the events
+store events into '/user/pp_dt_mkt_batch/page_events/stg_eap_events' USING PigStorage('\u0001');
+--store events into '/apps/mktg/m360/prod/data/Stage/stg_eap_events' USING PigStorage('\u0001');
